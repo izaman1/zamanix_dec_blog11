@@ -6,6 +6,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import fs from 'fs';
 import blogRoutes from './routes/blogRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import { errorHandler, notFound } from './middleware/errorMiddleware.js';
@@ -17,53 +18,60 @@ const PORT = process.env.PORT || 5000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Basic health check - respond immediately
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
-});
+// Create uploads directory if it doesn't exist
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
+
+// MongoDB Connection with retry logic
+const connectDB = async (retries = 5) => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+  } catch (error) {
+    console.error(`❌ MongoDB Connection Error: ${error.message}`);
+    if (retries > 0) {
+      console.log(`Retrying connection... (${retries} attempts remaining)`);
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+      return connectDB(retries - 1);
+    }
+    process.exit(1);
+  }
+};
+
+// Connect to MongoDB
+connectDB();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 10000,
-  keepAlive: true
-})
-.then(() => console.log('✅ MongoDB Connected'))
-.catch(err => console.error('❌ MongoDB Connection Error:', err.message));
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
-// API Routes
+// Routes
 app.use('/api/blogs', blogRoutes);
 app.use('/api/users', userRoutes);
 
-// Serve static files in production
-if (process.env.NODE_ENV === 'production') {
-  const distPath = path.join(__dirname, '..', 'dist');
-  app.use(express.static(distPath));
-  
-  app.get('*', (req, res, next) => {
-    if (req.url.startsWith('/api')) {
-      return next();
-    }
-    res.sendFile(path.join(distPath, 'index.html'));
+// Health check route
+app.get('/api/health', (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const dbStatus = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting',
+  };
+
+  res.json({
+    status: 'ok',
+    timestamp: new Date(),
+    database: {
+      state: dbStatus[dbState],
+      name: mongoose.connection.name,
+      host: mongoose.connection.host
+    },
+    environment: process.env.NODE_ENV,
   });
-}
+});
 
 // Error Handling
 app.use(notFound);
@@ -77,4 +85,8 @@ app.listen(PORT, () => {
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled Promise Rejection:', err);
+  // Don't exit the process in development
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
 });
